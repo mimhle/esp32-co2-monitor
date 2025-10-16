@@ -1,5 +1,5 @@
-#include "OneButton.h"
 #include "esp32-hal-tinyusb.h"
+#include "secrets.h"
 #include "utils.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -12,19 +12,17 @@
 #include <Wire.h>
 #include <esp_sleep.h>
 #include <esp_wifi.h>
-#include "secrets.h"
 
 #define DIVIDER_RATIO 2.0129
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 32
 #define LED_PIN 48
-#define BAT_PIN 1
+#define BAT_PIN 7
 
 Preferences preferences;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 SensirionI2cScd4x sensor;
-OneButton btn = OneButton(0, true, true);
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -50,8 +48,11 @@ uint8_t wifiIndex = 0;
 String wifiSSID;
 
 void setupWifi() {
+    wifi_country_t country = {"VN", 1, 13, WIFI_COUNTRY_POLICY_MANUAL};
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(true);
+    esp_wifi_set_max_tx_power(84);
+    esp_wifi_set_country(&country);
+    WiFi.setSleep(false);
     WiFi.persistent(false);
     WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t info) {
         if (e == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
@@ -101,6 +102,7 @@ void connectMQTT() {
         return;
     String cid = "ESP32Client-";
     cid += String(random(0xffff), HEX);
+    client.setServer(MQTT_BROKER, MQTT_PORT);
     if (client.connect(cid.c_str())) {
         // Connected
     } else {
@@ -193,8 +195,11 @@ float readBatteryVoltage() {
     return ema_vbat;
 }
 
+int16_t sensor_error = 0;
+
 void setup() {
-    // Serial.begin(115200);
+    Serial.begin(115200);
+    Serial.println("Serial started");
 
     setupWifi();
 
@@ -202,17 +207,13 @@ void setup() {
 
     esp_sleep_enable_timer_wakeup(5ULL * 1000000ULL);
 
-    Wire.begin(7, 6);
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        for (;;)
-            ;
-    }
-
+    Wire.begin(8, 9);
+    display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
     sensor.begin(Wire, SCD41_I2C_ADDR_62);
 
-    delay(30);
-    sensor.wakeUp();
-    sensor.startPeriodicMeasurement();
+    delay(50);
+    sensor_error = sensor.wakeUp();
+    sensor_error = sensor.startPeriodicMeasurement();
 
     pinMode(LED_PIN, OUTPUT);
 
@@ -222,15 +223,18 @@ void setup() {
 
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
-    // display.setRotation(preferences.getChar("rotation", 0));
+    display.setRotation(2);
     display.setTextSize(1);
     display.setCursor(0, 10);
-    display.print("Loading...");
+    display.println("Loading...");
+    if (sensor_error != 0) {
+        display.print("Sensor error: ");
+        display.print(sensor_error);
+    }
     display.display();
 }
 
 void loop() {
-    btn.tick();
     if (wifiConnected) {
         if (!client.connected()) {
             connectMQTT();
@@ -255,11 +259,12 @@ void loop() {
         startWifiConnectAsync(String(access_points[wifiIndex]), String(passwords[wifiIndex]));
         while (wifiConnectInProgress) {
             delay(500);
+            Serial.print(".");
         }
+        Serial.printf("SSID: %s, Status: %d, Reason: %d\n", access_points[wifiIndex], wifiLastStatus, wifiLastReason);
         if (wifiLastStatus == WL_CONNECTED) {
             wifiConnected = true;
             wifiSSID = access_points[wifiIndex];
-            client.setServer(MQTT_BROKER, MQTT_PORT);
             connectMQTT();
         } else {
             wifiConnected = false;
@@ -287,10 +292,7 @@ void loop() {
 
     canvas.setTextSize(2);
     canvas.setCursor(0, 15);
-    if (vbat < 3.3f)
-        canvas.print("---");
-    else
-        canvas.print(co2Concentration);
+    canvas.print(co2Concentration);
     canvas.setTextSize(1);
     canvas.print("ppm");
 
